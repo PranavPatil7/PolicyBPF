@@ -1,4 +1,4 @@
-# ZTAP: Zero Trust Access Platform
+# PolicyBPF – eBPF Driven Kubernetes Network Policy Engine                                                  
 
 > Open-source zero-trust microsegmentation with eBPF enforcement, policy-as-code, and hybrid cloud support
 
