@@ -1,0 +1,439 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: "0 2 * * *"
+
+jobs:
+  lint:
+    name: Lint & Format Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Run go fmt
+        run: |
+          fmt_output=$(go fmt ./...)
+          if [ -n "$fmt_output" ]; then
+            echo "The following files need formatting:"
+            echo "$fmt_output"
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: |
+          # Exclude examples directory (contains multiple main packages)
+          go vet $(go list ./... | grep -v '/examples$')
+
+      - name: Install golangci-lint from source
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.59.1
+
+      - name: Run golangci-lint
+        run: golangci-lint run --timeout=5m --skip-dirs examples
+        # TODO: remove once golangci-lint supports Go 1.24 export data (currently fails typecheck)
+        continue-on-error: true
+
+  test-go:
+    name: Go Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        go-version: ["1.24"]
+
+    env:
+      GOFLAGS: -buildvcs=false
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Clean Go build cache
+        run: go clean -cache -testcache
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run unit tests
+        run: go test ./pkg/... -v -coverprofile=coverage-${{ matrix.os }}.out
+
+      - name: Run integration tests
+        run: go test ./tests/integration_test.go -v
+
+      - name: Run CLI tests
+        run: go test ./tests/cli_test.go -v -timeout 5m
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}
+          path: coverage-${{ matrix.os }}.out
+
+  test-integration:
+    name: Integration Tests (Linux)
+    runs-on: ubuntu-latest
+    needs: lint
+
+    env:
+      GOFLAGS: -buildvcs=false
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run policy enforcer integration tests
+        run: go test -v -timeout=60s -tags=integration ./pkg/enforcer/... -run TestPolicyEnforcer
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Run Gosec Security Scanner
+        uses: securego/gosec@v2.21.4
+        with:
+          args: "-no-fail -fmt json -out gosec-results.json ./..."
+        continue-on-error: true
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-results.sarif"
+        continue-on-error: true
+
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+        continue-on-error: true
+
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: moderate
+
+  test-python:
+    name: Python Anomaly Detection Tests
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('pkg/anomaly/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          cd pkg/anomaly
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run Python tests
+        run: |
+          cd pkg/anomaly
+          python -m pytest test_service.py -v --cov=service --cov-report=xml
+
+      - name: Upload Python coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage
+          path: pkg/anomaly/coverage.xml
+
+  docker-build:
+    name: Docker Build Test
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ZTAP Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: ztap:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build Anomaly Detector Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./pkg/anomaly
+          file: ./pkg/anomaly/Dockerfile
+          push: false
+          tags: ztap-anomaly:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Test Docker Compose Stack
+        run: |
+          docker compose -f docker-compose.yml config
+          docker compose -f docker-compose.yml up -d
+          sleep 10
+          docker compose -f docker-compose.yml ps
+          docker compose -f docker-compose.yml down
+
+  ebpf-verification:
+    name: eBPF Verification (Linux)
+    runs-on: ubuntu-latest
+    needs: [lint, test-go]
+    # Forked PRs cannot run privileged eBPF steps
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    env:
+      GOFLAGS: -buildvcs=false
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Install eBPF build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm make linux-headers-$(uname -r)
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ebpf-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ebpf-${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Compile eBPF program
+        run: |
+          make -C bpf
+          sudo mkdir -p /usr/local/share/ztap/bpf
+          sudo cp -v bpf/filter.o /usr/local/share/ztap/bpf/filter.o
+
+      - name: Inspect eBPF object (ELF)
+        run: |
+          which llvm-objdump || true
+          which llvm-readelf || true
+          echo "ls -l built object and system path" && ls -l bpf/filter.o /usr/local/share/ztap/bpf/filter.o
+          echo "readelf -S" && (llvm-readelf -S bpf/filter.o || readelf -S bpf/filter.o)
+          echo "objdump -h" && (llvm-objdump -h bpf/filter.o || objdump -h bpf/filter.o)
+
+      - name: Run eBPF integration test
+        env:
+          ZTAP_BPF_OBJECT: /usr/local/share/ztap/bpf/filter.o
+          ZTAP_DEBUG_EBPF: "1"
+        run: sudo --preserve-env=PATH,HOME,GOFLAGS,GOMODCACHE,GOCACHE,ZTAP_BPF_OBJECT,ZTAP_DEBUG_EBPF go test -tags integration ./pkg/enforcer -run TestEBPFIntegrationLoadAndAttach -v
+
+  coverage-report:
+    name: Generate Coverage Report
+    needs: [test-go, test-python]
+    runs-on: ubuntu-latest
+    if: always() && (needs.test-go.result == 'success' || needs.test-python.result == 'success')
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Download all coverage artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: coverage-reports
+
+      - name: Display coverage structure
+        run: ls -R coverage-reports
+
+      - name: Generate combined coverage report
+        run: |
+          echo "## Test Coverage Summary" > coverage-summary.md
+          echo "" >> coverage-summary.md
+          for file in coverage-reports/coverage-*/coverage-*.out; do
+            if [ -f "$file" ]; then
+              os=$(basename $(dirname "$file") | sed 's/coverage-//')
+              echo "### $os" >> coverage-summary.md
+              go tool cover -func="$file" | tail -1 >> coverage-summary.md
+              echo "" >> coverage-summary.md
+            fi
+          done
+
+      - name: Upload coverage summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-summary
+          path: coverage-summary.md
+
+  build-check:
+    name: Build Check (Multi-Platform)
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      matrix:
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Build for ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -o ztap-${{ matrix.goos }}-${{ matrix.goarch }} .
+          ls -lh ztap-${{ matrix.goos }}-${{ matrix.goarch }}
+
+  benchmark:
+    name: Benchmark Tests
+    runs-on: ubuntu-latest
+    needs: test-go
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Run benchmarks
+        run: |
+          go test ./pkg/... -bench=. -benchmem -run=^$ > benchmark-results.txt || true
+          cat benchmark-results.txt
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results.txt
+
+  all-checks:
+    name: All Checks Passed
+    runs-on: ubuntu-latest
+    needs:
+      - lint
+      - test-go
+      - test-integration
+      - test-python
+      - docker-build
+      - ebpf-verification
+      - security-scan
+      - build-check
+    if: always()
+
+    steps:
+      - name: Check all jobs status
+        run: |
+          echo "Job Results:"
+          echo "  lint: ${{ needs.lint.result }}"
+          echo "  test-go: ${{ needs.test-go.result }}"
+          echo "  test-integration: ${{ needs.test-integration.result }}"
+          echo "  test-python: ${{ needs.test-python.result }}"
+          echo "  docker-build: ${{ needs.docker-build.result }}"
+          echo "  ebpf-verification: ${{ needs.ebpf-verification.result }}"
+          echo "  security-scan: ${{ needs.security-scan.result }}"
+          echo "  build-check: ${{ needs.build-check.result }}"
+          echo ""
+
+          if [ "${{ contains(needs.*.result, 'failure') }}" == "true" ]; then
+            echo "Some checks failed"
+            exit 1
+          elif [ "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]; then
+            echo "Some checks were cancelled"
+            exit 1
+          else
+            echo "All checks passed!"
+          fi

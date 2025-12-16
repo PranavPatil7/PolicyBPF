@@ -1,0 +1,100 @@
+# Binaries
+ztap
+ztap_*
+*_example
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries and coverage
+*.test
+*.out
+coverage.html
+coverage.out
+
+# Go workspace file
+go.work
+go.work.sum
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.iml
+.project
+.settings/
+.classpath
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Logs and databases
+*.log
+*.db
+*.sqlite
+*.sqlite3
+.ztap/
+
+# Configuration (keep template)
+config.local.yaml
+*.local.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+*.egg-info/
+dist/
+build/
+
+# Docker
+docker-compose.override.yml
+.dockerignore
+
+# Prometheus/Grafana data
+deployments/prometheus-data/
+deployments/grafana-data/
+
+# eBPF compiled objects
+bpf/*.o
+bpf/*.ll
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# Build artifacts
+bin/
+vendor/
+
+# Development and testing
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.crt
+*.csr
+
+# Node modules (if any frontend is added)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+

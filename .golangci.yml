@@ -1,0 +1,15 @@
+run:
+  timeout: 5m
+
+issues:
+  exclude-dirs:
+    - examples
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - gosimple
+    - ineffassign
+    - staticcheck
+    - unused
